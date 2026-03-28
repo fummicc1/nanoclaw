@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -16,6 +16,7 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -227,6 +228,7 @@ async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentIdentifier?: string,
+  group?: RegisteredGroup,
 ): Promise<string[]> {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -242,10 +244,35 @@ async function buildContainerArgs(
   if (onecliApplied) {
     logger.info({ containerName }, 'OneCLI gateway config applied');
   } else {
-    logger.warn(
-      { containerName },
-      'OneCLI gateway not reachable — container will have no credentials',
-    );
+    // Fallback: inject OAuth token or API key directly from .env
+    const credEnv = readEnvFile([
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'ANTHROPIC_API_KEY',
+    ]);
+    if (credEnv.CLAUDE_CODE_OAUTH_TOKEN) {
+      args.push(
+        '-e',
+        `CLAUDE_CODE_OAUTH_TOKEN=${credEnv.CLAUDE_CODE_OAUTH_TOKEN}`,
+      );
+      logger.info({ containerName }, 'OAuth token injected from .env');
+    } else if (credEnv.ANTHROPIC_API_KEY) {
+      args.push('-e', `ANTHROPIC_API_KEY=${credEnv.ANTHROPIC_API_KEY}`);
+      logger.info({ containerName }, 'API key injected from .env');
+    } else {
+      logger.warn(
+        { containerName },
+        'OneCLI gateway not reachable and no credentials in .env',
+      );
+    }
+  }
+
+  // Inject per-group GitHub fine-grained PAT so gh CLI can authenticate.
+  if (group?.containerConfig?.ghTokenKey) {
+    const ghEnv = readEnvFile([group.containerConfig.ghTokenKey]);
+    const ghToken = ghEnv[group.containerConfig.ghTokenKey];
+    if (ghToken) {
+      args.push('-e', `GH_TOKEN=${ghToken}`);
+    }
   }
 
   // Runtime-specific args for host gateway resolution
@@ -296,6 +323,7 @@ export async function runContainerAgent(
     mounts,
     containerName,
     agentIdentifier,
+    group,
   );
 
   logger.debug(
@@ -431,15 +459,15 @@ export async function runContainerAgent(
         { group: group.name, containerName },
         'Container timeout, stopping gracefully',
       );
-      exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
-        if (err) {
-          logger.warn(
-            { group: group.name, containerName, err },
-            'Graceful stop failed, force killing',
-          );
-          container.kill('SIGKILL');
-        }
-      });
+      try {
+        stopContainer(containerName);
+      } catch (err: unknown) {
+        logger.warn(
+          { group: group.name, containerName, err },
+          'Graceful stop failed, force killing',
+        );
+        container.kill('SIGKILL');
+      }
     };
 
     let timeout = setTimeout(killOnTimeout, timeoutMs);

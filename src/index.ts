@@ -708,8 +708,8 @@ async function main(): Promise<void> {
 // Guard: only run when executed directly, not when imported by tests
 const isDirectRun =
   process.argv[1] &&
-  new URL(import.meta.url).pathname ===
-    new URL(`file://${process.argv[1]}`).pathname;
+  decodeURIComponent(new URL(import.meta.url).pathname) ===
+    decodeURIComponent(new URL(`file://${process.argv[1]}`).pathname);
 
 if (isDirectRun) {
   main().catch((err) => {
